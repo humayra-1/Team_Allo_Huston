@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+<style>
+:root{box-sizing:border-box}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:#05040f;overflow:hidden;font-family:system-ui,sans-serif}
+canvas{display:block;width:100vw;height:100vh;image-rendering:pixelated}
+#modal{position:fixed;inset:0;background:rgba(5,4,15,.82);display:flex;align-items:center;justify-content:center;z-index:5;
+padding:env(safe-area-inset-top,0) 20px env(safe-area-inset-bottom,0)}
+#card{background:#1b1440;border:1px solid #3a2f80;border-radius:16px;padding:28px 30px;max-width:380px;color:#f0ecff;text-align:center}
+#card h2{margin:0 0 10px;font-size:1.3rem;color:#ffd23f}
+#card p{margin:6px 0;color:#c9c0ee;font-size:.95rem;line-height:1.5}
+#card .keys{display:flex;justify-content:center;gap:10px;margin:16px 0}
+.key{background:#2a2060;border:1px solid #4c3fa0;border-radius:8px;padding:8px 12px;font-weight:700;min-width:36px}
+#card button{margin-top:10px;background:#3ee0c0;color:#0c0a1f;border:0;border-radius:10px;padding:10px 22px;font-weight:700;font-size:1rem;cursor:pointer}
+#card button:focus-visible{outline:3px solid #ffd23f;outline-offset:2px}
+#edge{position:fixed;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center;font-size:1.1rem;color:#ffd23f;
+background:rgba(5,4,15,.45);opacity:0;transition:opacity .3s;z-index:3}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="edge"></div>
+<div id="modal"><div id="card">
+<p>Walk the outpost and check out every module.</p>
+<div class="keys"><span class="key">←</span><span class="key">→</span><span class="key">↑</span></div>
+<p>Left / right arrows to walk. Up arrow (or space) to jump — gravity here is a sixth of Earth's, so it's slow and floaty.</p>
+<button id="startBtn">Start walking</button>
+</div></div>
+<script>
+/* ===== YOUR IMAGES =====
+Put a folder named "images" in the same place as this HTML file, and drop your PNGs in
+with these exact names (transparent background works best).
+If a file is missing, that piece just falls back to the drawn version below — nothing breaks. */
+const SPRITES = {
+  astronaut: "./images/astronaut.png",
+  base:      "./images/base copy.png",
+  solar:     "./images/solarpanel.png",
+  water:     "./images/water copy.png",
+  nuclear:     "./images/nuclearpowerreactor.png",
+  power:     "./images/power copy.png",
+  rover:     "./images/rover.png",
+  living:    "./images/living copy.png",
+  lab:       "./images/labratory copy.png",
+  food:      "./images/food copy.png",
+  earth:     "./images/earth.png",
+  green:     "./images/greenhouse.png"
+};
+const imgEls={};
+for(const k in SPRITES){ const im=new Image(); im.onerror=()=>{imgEls[k]=null;}; im.src=SPRITES[k]; imgEls[k]=im; }
+
+const cv=document.getElementById('c'),x=cv.getContext('2d');
+let W=0,H=0,GROUND=0,SCALE=1;
+function resize(){
+  W=cv.width=window.innerWidth; H=cv.height=window.innerHeight;
+  GROUND=H*0.72; SCALE=Math.max(1,H/620);
+}
+window.addEventListener('resize',resize); resize();
+
+// 10 modules now, spread further apart so the bigger art has room
+const WORLD_LEN=4500;
+const structures=[
+ {type:'base',  px:360, label:'Base Camp'},
+ {type:'solar', px:800, label:'Solar Panels'},
+ {type:'nuclear',px:1050, label:'Nuclear Reactor'},
+{type:'power', px:1400,label:'Power Center'},
+ {type:'green', px:1880,label:'Greenhouse'},
+ {type:'food',  px:2300,label:'Food Production Center'},
+ {type:'water', px:2800, label:'Water Management Center'},
+ {type:'lab',   px:3300,label:'Laboratory'},
+ {type:'rover', px:3800,label:'Rover'},
+ {type:'living',px:4200,label:'Living Space'},
+];
+
+const starsFar=Array.from({length:160},()=>({x:Math.random(),y:Math.random()*0.65,r:Math.random()*1.3+.4,tw:Math.random()*7}));
+const starsNear=Array.from({length:50},()=>({x:Math.random(),y:Math.random()*0.5,r:Math.random()*1.8+.8,tw:Math.random()*7}));
+const streaks=Array.from({length:12},()=>({x:Math.random(),y:Math.random()*0.5,len:50+Math.random()*100,a:.12+Math.random()*.22,ang:-0.15+Math.random()*0.1}));
+const mountains=[]; for(let i=0;i<=24;i++) mountains.push(0.18+Math.random()*0.5*(i%3===0?1:0.5));
+const craters=[];
+{ let wx=30;
+  while(wx<WORLD_LEN-30){
+    wx+=60+Math.random()*100;
+    const dyFrac=0.18+Math.random()*0.78;
+    const rx=(7+Math.random()*13)*(0.55+dyFrac*0.9);
+    craters.push({wx,dyFrac,rx,ry:rx*(0.5+Math.random()*0.18),rot:(Math.random()-0.5)*0.5});
+  }
+}
+const rocks=Array.from({length:60},()=>({wx:Math.random()*WORLD_LEN,r:3+Math.random()*7,dy:Math.random()*0.7}));
+const speckle=Array.from({length:560},()=>({wx:Math.random()*WORLD_LEN,dy:Math.random()*0.95,r:0.6+Math.random()*1.8,v:Math.random()}));
+
+let camera=0, started=false;
+let player={wx:60,y:0,vy:0,onGround:true,facing:1,walkCycle:0,moving:false};
+const GRAVITY=0.16, JUMP_V=-5.4, SPEED=3.2;
+const keys={};
+window.addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','ArrowUp',' '].includes(e.key))e.preventDefault();keys[e.key]=true;});
+window.addEventListener('keyup',e=>{keys[e.key]=false;});
+document.getElementById('startBtn').addEventListener('click',()=>{started=true;document.getElementById('modal').style.display='none';});
+
+function update(){
+  if(!started)return;
+  player.moving=false;
+  if(keys['ArrowRight']){player.wx+=SPEED;player.facing=1;player.moving=true;}
+  if(keys['ArrowLeft']){player.wx-=SPEED;player.facing=-1;player.moving=true;}
+  player.wx=Math.max(24,Math.min(WORLD_LEN-24,player.wx));
+  if((keys['ArrowUp']||keys[' '])&&player.onGround){player.vy=JUMP_V;player.onGround=false;}
+  player.vy+=GRAVITY; player.y+=player.vy;
+  if(player.y>=0){player.y=0;player.vy=0;player.onGround=true;}
+  if(player.moving)player.walkCycle+=0.16;
+  const target=player.wx-(W/SCALE)*0.35;
+  camera+=(Math.max(0,Math.min(WORLD_LEN-W/SCALE,target))-camera)*0.12;
+  const edgeEl=document.getElementById('edge');
+  const atEdge=player.wx<=28||player.wx>=WORLD_LEN-28;
+  edgeEl.style.opacity=atEdge?1:0;
+  edgeEl.textContent=player.wx<=28?'⟵ edge of the mapped outpost':'edge of the mapped outpost ⟶';
+}
+
+function drawSky(t){
+  const g=x.createLinearGradient(0,0,0,GROUND);
+  g.addColorStop(0,'#070512');g.addColorStop(.6,'#140d33');g.addColorStop(1,'#2b2050');
+  x.fillStyle=g;x.fillRect(0,0,W,GROUND);
+  const sx=W-W*0.14-camera*0.015*SCALE, sy=H*0.16;
+  const R=Math.min(W,H)*0.11;
+  const sg=x.createRadialGradient(sx,sy,R*0.1,sx,sy,R);
+  sg.addColorStop(0,'#fff3c4');sg.addColorStop(.4,'#ffd23f');sg.addColorStop(.75,'#ff9d3f');sg.addColorStop(1,'rgba(255,157,63,0)');
+  x.fillStyle=sg;x.beginPath();x.arc(sx,sy,R,0,7);x.fill();
+  x.fillStyle='#fff8df';x.beginPath();x.arc(sx,sy,R*0.34,0,7);x.fill();
+  const ex=W*0.1-camera*0.05*SCALE, ey=H*0.12, er=Math.min(W,H)*0.045;
+  if(ex>-er*2&&ex<W+er*2){
+    if(imgEls.earth&&imgEls.earth.complete&&imgEls.earth.naturalWidth) x.drawImage(imgEls.earth,ex-er,ey-er,er*2,er*2);
+    else{
+      x.save();x.beginPath();x.arc(ex,ey,er,0,7);x.clip();
+      const og=x.createRadialGradient(ex-er*0.35,ey-er*0.35,er*0.1,ex,ey,er*1.15);
+      og.addColorStop(0,'#5fb3ff');og.addColorStop(.55,'#2d7ef7');og.addColorStop(1,'#1858b8');
+      x.fillStyle=og;x.fillRect(ex-er,ey-er,er*2,er*2);
+      x.fillStyle='#39b86a';
+      x.beginPath();x.ellipse(ex-er*0.32,ey-er*0.3,er*0.42,er*0.3,0.5,0,7);x.fill();
+      x.beginPath();x.ellipse(ex+er*0.4,ey-er*0.05,er*0.22,er*0.34,-0.3,0,7);x.fill();
+      x.beginPath();x.ellipse(ex-er*0.05,ey+er*0.5,er*0.34,er*0.22,0.2,0,7);x.fill();
+      x.fillStyle='#2f9a58';
+      x.beginPath();x.ellipse(ex-er*0.38,ey-er*0.22,er*0.16,er*0.1,0.4,0,7);x.fill();
+      x.fillStyle='rgba(255,255,255,0.75)';
+      x.beginPath();x.ellipse(ex+er*0.1,ey-er*0.42,er*0.3,er*0.1,0.3,0,7);x.fill();
+      x.beginPath();x.ellipse(ex-er*0.45,ey+er*0.15,er*0.22,er*0.08,-0.2,0,7);x.fill();
+      x.beginPath();x.ellipse(ex+er*0.3,ey+er*0.45,er*0.26,er*0.09,0.1,0,7);x.fill();
+      const hl=x.createRadialGradient(ex-er*0.4,ey-er*0.4,0,ex-er*0.4,ey-er*0.4,er*0.9);
+      hl.addColorStop(0,'rgba(255,255,255,0.35)');hl.addColorStop(1,'rgba(255,255,255,0)');
+      x.fillStyle=hl;x.fillRect(ex-er,ey-er,er*2,er*2);
+      x.restore();
+      x.strokeStyle='rgba(10,20,40,0.4)';x.lineWidth=Math.max(1,er*0.04);
+      x.beginPath();x.arc(ex,ey,er,0,7);x.stroke();
+    }
+  }
+  starsFar.forEach(s=>{let sxp=(s.x*W-camera*0.05*SCALE)%W; if(sxp<0)sxp+=W;
+    const tw=0.5+0.5*Math.sin(t*0.002+s.tw);x.fillStyle=`rgba(255,255,255,${tw})`;x.fillRect(sxp,s.y*H,s.r*SCALE,s.r*SCALE);});
+  streaks.forEach(s=>{let sxp=(s.x*W-camera*0.08*SCALE)%W; if(sxp<0)sxp+=W;
+    x.strokeStyle=`rgba(180,200,255,${s.a})`;x.lineWidth=1;
+    x.beginPath();x.moveTo(sxp,s.y*H);x.lineTo(sxp+s.len*Math.cos(s.ang),s.y*H+s.len*Math.sin(s.ang));x.stroke();});
+  starsNear.forEach(s=>{let sxp=(s.x*W-camera*0.15*SCALE)%W; if(sxp<0)sxp+=W;
+    const tw=0.6+0.4*Math.sin(t*0.003+s.tw+2);x.fillStyle=`rgba(255,255,255,${tw})`;x.fillRect(sxp,s.y*H,s.r*SCALE,s.r*SCALE);});
+  const mh=H*0.07;
+  x.fillStyle='#1c1536';
+  x.beginPath();x.moveTo(0,GROUND);
+  const seg=W/(mountains.length-1);
+  mountains.forEach((v,i)=>{const mxp=((i*seg - (camera*0.12*SCALE))%(W+seg)+W+seg)%(W+seg)-seg;
+    x.lineTo(mxp, GROUND-v*mh);});
+  x.lineTo(W,GROUND);x.closePath();x.fill();
+}
+
+function toScreen(wx){return (wx-camera)*SCALE;}
+
+function groundPath(){
+  x.beginPath();x.moveTo(0,GROUND+4);
+  x.quadraticCurveTo(W/2,GROUND-6,W,GROUND+4);
+  x.lineTo(W,H);x.lineTo(0,H);x.closePath();
+}
+
+function drawGround(){
+  const g=x.createLinearGradient(0,GROUND,0,H);
+  g.addColorStop(0,'#e6e4ea');g.addColorStop(.25,'#d2d0d8');g.addColorStop(.6,'#b8b6c0');g.addColorStop(1,'#9b99a4');
+  x.fillStyle=g;groundPath();x.fill();
+  x.strokeStyle='rgba(60,58,70,0.35)';x.lineWidth=2;
+  x.beginPath();x.moveTo(0,GROUND+4);x.quadraticCurveTo(W/2,GROUND-6,W,GROUND+4);x.stroke();
+
+  x.save();groundPath();x.clip();
+
+  speckle.filter((p,i)=>i%9===0).forEach(p=>{const sx=toScreen(p.wx);if(sx<-80||sx>W+80)return;
+    const r=40*SCALE*(0.6+p.v);
+    x.fillStyle=p.v>0.5?'rgba(255,255,255,0.22)':'rgba(120,116,130,0.10)';
+    x.beginPath();x.ellipse(sx,GROUND+30+p.dy*60,r,r*0.4,0.2,0,7);x.fill();});
+  speckle.forEach(p=>{if(p.v<0.85)return; const sx=toScreen(p.wx);if(sx<-6||sx>W+6)return;
+    x.fillStyle='rgba(110,106,118,0.18)';x.fillRect(sx,GROUND+10+p.dy*(H-GROUND-14),p.r*SCALE,p.r*SCALE);});
+
+  craters.forEach(c=>{const sx=toScreen(c.wx);if(sx<-60||sx>W+60)return;
+    const rx=c.rx*SCALE, ry=c.ry*SCALE, cy=GROUND+16+c.dyFrac*(H-GROUND-20);
+    x.save();x.translate(sx,cy);x.rotate(c.rot);
+    x.fillStyle='rgba(60,58,70,0.14)';x.beginPath();x.ellipse(rx*0.15,ry*0.25,rx*1.15,ry*1.15,0,0,7);x.fill();
+    x.fillStyle='#c3c0c9';x.beginPath();x.ellipse(0,0,rx,ry,0,0,7);x.fill();
+    x.strokeStyle='#89868f';x.lineWidth=Math.max(1,rx*0.14);x.beginPath();x.ellipse(0,0,rx,ry,0,0,7);x.stroke();
+    x.fillStyle='#716e79';x.beginPath();x.ellipse(rx*0.14,ry*0.14,rx*0.62,ry*0.62,0,0,7);x.fill();
+    x.strokeStyle='rgba(240,238,245,0.8)';x.lineWidth=Math.max(0.8,rx*0.1);
+    x.beginPath();x.ellipse(0,0,rx*0.92,ry*0.92,0,Math.PI*1.05,Math.PI*1.75);x.stroke();
+    x.restore();});
+
+  rocks.forEach(p=>{const sx=toScreen(p.wx);if(sx<-10||sx>W+10)return;
+    const r=p.r*SCALE, ry=GROUND+14+p.dy*(H-GROUND-18);
+    x.fillStyle='rgba(60,58,70,0.2)';x.beginPath();x.ellipse(sx+r*0.3,ry+r*0.3,r*0.9,r*0.4,0,0,7);x.fill();
+    x.fillStyle='#8c8993';x.beginPath();x.arc(sx,ry,r,0,7);x.fill();
+    x.strokeStyle='#6f6c77';x.lineWidth=1;x.beginPath();x.arc(sx,ry,r,0,7);x.stroke();
+    x.fillStyle='rgba(255,255,255,0.55)';x.beginPath();x.arc(sx-r*0.3,ry-r*0.3,r*0.32,0,7);x.fill();});
+
+  x.restore();
+}
+
+function label(sx,topY,text){
+  x.font=`${13*SCALE}px system-ui`;x.fillStyle='#e8e2ff';x.textAlign='center';
+  x.shadowColor='rgba(0,0,0,.6)';x.shadowBlur=4;
+  x.fillText(text,sx,topY);
+  x.shadowBlur=0;
+}
+
+// how far each image's bottom edge sinks below the ground line — this is what
+// hides any transparent padding at the bottom of your PNGs and kills the "floating" look.
+// raise this number if something still looks like it's hovering.
+// how far each building sinks into the ground, in world units.
+// raise base/solar's numbers more since those two are still floating.
+
+
+// how far each building sinks into the ground, in world units.
+// raise base/solar's numbers more since those two are still floating.
+const SINK={base:80,solar:105,water:85,green:80,food:80,power:80,lab:80,rover:100,living:80};
+// real proportions, so nothing gets squashed or stretched to fit a box anymore.
+const TARGET_H={base:200,solar:120,water:170,green:170,food:170,power:210,lab:180,rover:130,living:160};
+const LABEL_H={base:90,solar:92,water:90,green:76,food:76,power:96,lab:84,rover:62,living:76};
+
+function drawStructure(s){
+  const sx=toScreen(s.px);
+  if(sx<-240*SCALE||sx>W+240*SCALE)return;
+  const base=GROUND+(SINK[s.type]!=null?SINK[s.type]:45)*SCALE, sc=SCALE*1.6;  const im=imgEls[s.type];
+  const hasImg=im&&im.complete&&im.naturalWidth;
+  x.save();x.translate(sx,base);
+
+  if(hasImg){
+    const H2=(TARGET_H[s.type]||170)*sc;
+    const W2=H2*(im.naturalWidth/im.naturalHeight);
+    x.drawImage(im,-W2/2,-H2,W2,H2);
+  } else {
+    x.scale(sc,sc);
+    if(s.type==='base'){
+      x.fillStyle='#c9c4e0';x.beginPath();x.arc(0,0,46,Math.PI,0);x.fill();
+      x.fillStyle='#7d76a8';x.fillRect(-46,0,92,8);
+      x.fillStyle='#3ee0c0';x.fillRect(-11,-18,22,18);
+      x.fillStyle='#1c3a7a';x.fillRect(-8,-15,16,12);
+    }else if(s.type==='solar'){
+      x.save();x.rotate(-0.25);x.fillStyle='#1c3a7a';x.fillRect(-48,-62,96,56);x.strokeStyle='#5c8cff';x.lineWidth=1.2;
+      for(let i=-40;i<48;i+=14){x.beginPath();x.moveTo(i,-62);x.lineTo(i,-6);x.stroke();}
+      x.restore();
+      x.fillStyle='#8c879c';x.fillRect(-5,-6,10,6);
+    }else if(s.type==='water'){
+      x.fillStyle='#3ea6e0';x.beginPath();x.moveTo(-28,0);x.lineTo(-28,-62);x.quadraticCurveTo(-28,-74,0,-74);x.quadraticCurveTo(28,-74,28,-62);x.lineTo(28,0);x.fill();
+      x.fillStyle='#1f6fa8';x.fillRect(-28,-24,56,9);
+    }else if(s.type==='green'){
+      x.fillStyle='#2f6b3f';x.globalAlpha=.85;x.beginPath();x.ellipse(0,-32,50,34,0,Math.PI,0);x.fill();x.globalAlpha=1;
+      x.strokeStyle='#4ea35c';x.lineWidth=2.2;
+      for(let i=-42;i<=42;i+=13){x.beginPath();x.moveTo(i,0);x.lineTo(i*0.3,-58);x.stroke();}
+      x.fillStyle='#7bd88f';[[-20,-22],[0,-10],[19,-26]].forEach(p=>{x.beginPath();x.arc(p[0],p[1],4.5,0,7);x.fill();});
+    }else if(s.type==='food'){
+      x.fillStyle='#b58a52';x.fillRect(-40,-44,80,44);
+      x.fillStyle='#8a6639';x.beginPath();x.moveTo(-46,-44);x.lineTo(0,-66);x.lineTo(46,-44);x.closePath();x.fill();
+      x.fillStyle='#e8d9a0';[[-22,-12],[-2,-12],[18,-12],[-22,-28],[-2,-28],[18,-28]].forEach(p=>{x.fillRect(p[0]-7,p[1]-7,14,14);});
+      x.fillStyle='#7bd88f';[[-22,-12],[-2,-12],[18,-12],[-22,-28],[-2,-28],[18,-28]].forEach(p=>{x.beginPath();x.arc(p[0],p[1],3,0,7);x.fill();});
+    }else if(s.type==='power'){
+      x.fillStyle='#6b6480';x.fillRect(-26,-58,52,58);
+      x.fillStyle=Math.sin(Date.now()*0.005)>0?'#ffd23f':'#a88f2a';x.fillRect(-17,-49,11,11);x.fillRect(6,-49,11,11);
+      x.strokeStyle='#cfc6ff';x.lineWidth=2;x.beginPath();x.moveTo(0,-58);x.lineTo(0,-78);x.stroke();
+      x.fillStyle='#ff6b6b';x.beginPath();x.arc(0,-80,3.2,0,7);x.fill();
+    }else if(s.type==='lab'){
+      x.fillStyle='#c9c4e0';x.fillRect(-42,-50,84,50);
+      x.fillStyle='#2a2440';x.beginPath();x.arc(0,-34,15,0,7);x.fill();
+      x.fillStyle='#5cc8ff';x.beginPath();x.arc(0,-34,11,0,7);x.fill();
+      x.strokeStyle='#8c879c';x.lineWidth=2;x.beginPath();x.moveTo(-14,-34);x.lineTo(14,-34);x.moveTo(0,-48);x.lineTo(0,-20);x.stroke();
+      x.fillStyle='#7d76a8';x.fillRect(-8,-16,16,16);
+    }else if(s.type==='rover'){
+      x.fillStyle='#b7b2cc';x.fillRect(-38,-28,76,22);
+      x.fillStyle='#8c879c';x.fillRect(-22,-44,40,18);
+      x.fillStyle='#2a2440';[-26,-4,26].forEach(wx=>{x.beginPath();x.arc(wx,-4,10,0,7);x.fill();});
+    }else if(s.type==='living'){
+      x.fillStyle='#d8bfa0';x.fillRect(-44,-54,88,54);
+      x.fillStyle='#3ee0c0';[-27,0,27].forEach(wx=>{x.beginPath();x.arc(wx,-32,6.5,0,7);x.fill();});
+      x.fillStyle='#7d76a8';x.fillRect(-7,-20,14,20);
+    }
+  }
+  x.restore();
+
+  const labelY = hasImg ? base-(TARGET_H[s.type]||170)*sc-14 : base-(LABEL_H[s.type]||70)*SCALE;
+  label(sx, labelY, s.label);
+}
+
+function drawAstronaut(){
+  const sx=toScreen(player.wx);
+  const bob=player.onGround?Math.sin(player.walkCycle)*4:0;
+  const hop=-player.y;
+  const sc=SCALE*1.5; // was 2.1 — astronaut was too big relative to the buildings
+  const baseY=GROUND+120*SCALE-hop*SCALE+bob*SCALE*0.3;  const im=imgEls.astronaut;
+  if(im&&im.complete&&im.naturalWidth){
+    const h=95*sc, w=h*(im.naturalWidth/im.naturalHeight); // keeps real proportions
+    x.save();
+    if(player.facing<0){x.translate(sx+w/2,baseY-h);x.scale(-1,1);x.drawImage(im,0,0,w,h);}
+    else x.drawImage(im,sx-w/2,baseY-h,w,h);
+    x.restore();
+    return;
+  }
+  x.save();x.translate(sx,baseY);x.scale(player.facing*sc,sc);
+  const leg=player.onGround&&player.moving?Math.sin(player.walkCycle)*6:0;
+  x.fillStyle='#e8e4f5';
+  x.fillRect(-7,-20+leg*0.3,5,20); x.fillRect(2,-20-leg*0.3,5,20);
+  x.fillStyle='#9a8fd6';x.fillRect(-15,-46,6,22);
+  x.fillStyle='#f4f1ff';x.fillRect(-9,-46,18,26);
+  x.fillStyle='#3ee0c0';x.fillRect(-9,-38,18,6);
+  x.fillStyle='#e8e4f5';x.fillRect(-13,-44,5,16); x.fillRect(8,-44,5,16);
+  x.fillStyle='#f4f1ff';x.beginPath();x.arc(0,-54,11,0,7);x.fill();
+  x.fillStyle='#1c3a7a';x.beginPath();x.arc(2,-54,7,0,7);x.fill();
+  x.restore();
+}
+
+function frame(t){
+  x.clearRect(0,0,W,H);
+  drawSky(t);
+  drawGround();
+  structures.forEach(drawStructure);
+  drawAstronaut();
+  update();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
